@@ -1,0 +1,166 @@
+---
+title: "Coleta Brasil de Fato"
+author: "Andre M. Rodeguero Stefanuto"
+date: "2023-12-09"
+output: pdf_document
+---
+
+```{r}
+library(rvest)
+library(stringr)
+library(tidyverse)
+library(httr)
+library(RCurl)
+library(xml2)
+```
+
+## PRIMEIRA ETAPA: COLETA DE TEXTOS
+
+
+O primeiro passo da coleta de dados no Brasil de Fato utilizando o __web scraping__ é obter todos os links das matérias através do buscador do site. Para tanto, preciso (1) definir a lista de palavras-chave da busca; e (2) criar um __data frame__ no qual armazenarei os links obtidos e as palavras chave que utilizei para obtê-los.
+
+```{r}
+keywords <- c("mercado+de+carbono", "créditos+de+carbono", "compensações+de+carbono", "comércio+de+carbono")
+
+links_carb <- data.frame(link = character(), keyword = character(), stringsAsFactors = FALSE)
+```
+
+
+Isto feito, podemos realizar a coleta desses links. Ao longo do código, haverá comentários comentando partes específicas do código, além das descrições dada entre cada uma das etapas do processo.
+
+```{r}
+# Criando uma lista vazia para guardar os links; abaixo, ela será armazenada em um data frame
+keylinklist_carb <- list()
+
+#Iniciamos o for() para coleta dos links resultantes em cada uma das páginas de resultados;
+for (keyword in keywords) {
+        encoded_keyword <- URLencode(keyword)
+        keyword_links <- data.frame(link = character(), keyword = character(), stringsAsFactors = FALSE)
+        
+        num_page <- 1
+        while (TRUE) {
+                url <- paste0("https://www.brasildefato.com.br/pesquisar?pagina=", num_page, "&q=", encoded_keyword)
+                response <- GET(url)
+                page_content <- content(response, as = "text")
+                page <- read_html(page_content)
+                links <- page %>%
+                        html_nodes("a.news-item") %>% #id. de links na página de busca
+                        html_attr("href") #id do link de referência e não o título exibido
+                
+                if (length(links) == 0) {
+                        break  #Se não é mais links para buscar, podemos encerrar o loop
+                }
+                
+                keyword_links <- rbind(keyword_links, data.frame(link = links, keyword = keyword, stringsAsFactors = FALSE))
+                
+                num_page <- num_page + 1
+        }
+        
+        # Armazena os links obtidos e suas respectivas palavras-chave em uma lista contendo os data frames das diferentes palavras
+        keylinklist_carb <- c(keylinklist_carb, list(keyword_links))
+}
+```
+
+```{r}
+# Combina os diferentes data frames em um só.
+links_carb <- do.call(rbind, keylinklist_carb)
+```
+
+
+O objeto "links_carb" contém todos os links obtidos a partir das buscas com cada uma das palavras chave em sua coluna "link" e a palavra chave utilizada para obtenção daquele link na coluna "keyword". Ressalto que uma matéria pode ser encontrada a partir da busca com diferentes palavras chave. Para evitar a repetição de matérias nesta primeira busca, realizaremos a unificação delas. Cada matéria será observada uma primeira vez e todas as outras vezes em que aparecer, será removida. Sendo assim, a primeira palavra-chave não conterá matérias removidas pois apresentará somente matérias inéditas. 
+
+Agora, podemos realizar a unificação das matérias encontradas com cada uma das palavras chave aplicadas, mantendo "mangue" ao fim delas.
+
+```{r}
+un_links_carb <- data.frame(link = links_carb[!duplicated(links_carb$link), ])
+names(un_links_carb) <- c("link", "keyword")
+table(un_links_carb$keyword)
+```
+
+
+Já com todas as matérias coletadas e unificadas, não há mais repetições dos links. Podemos iniciar o processo de extração das informações de cada um desses links. Vamos, então, preparar cada uma das funções necessárias para extração de cada dado desejado:
+
+```{r}
+#Aqui, criamos a função responsável pela extração do título das matérias
+extract_title_bdf <- function(url){
+        page <- read_html(url)
+        title <- page %>% 
+                html_node(".title") %>%
+                html_text() %>%
+                trimws()
+        return(title)
+}
+
+#"h1.title[itemprop='headline']"
+#Se houver necessidade de testar a função:
+#url <- un_links_carb$link[10]
+#extract_title_bdf(url)
+```
+
+
+Em seguida, podemos desenvolver a função para extração das datas:
+
+
+```{r}
+extract_date_bdf <- function(url){
+        page <- read_html(url)
+        metadata <- page %>%
+                html_nodes("meta") %>%
+                html_attr("content")
+        date <- page %>% 
+                html_node('time.date') %>%
+                html_attr("datetime") %>% 
+                trimws()
+        date <- str_split(date, "T")
+        date <- date[[1]][1] 
+        date <- as.Date(date)
+        return(date)
+}
+
+#Se houver necessidade de testar a função:
+#url <- un_links_carb$link[15]
+#extract_date_bdf(url)
+```
+
+
+Com as funções corretamente criadas e funcionando em links individuais, é hora de colocá-las para rodar dentro de todo o conjunto de dados. Para tanto, criamos um __data frame__ vazio que receberá os dados conforme forem sendo coletados, um a um, dentro do for().
+
+```{r}
+bdf_data_carb <- data.frame(title = character(),
+                        date = character(),
+                        link = character(),
+                        stringsAsFactors = FALSE)
+```
+
+Em seguida, rodamos cada uma das funções de extração criadas acima dentro de um for, seguindo o critério de recorte temporal do trabalho:
+
+```{r}
+for (url in un_links_carb$link[1:length(un_links_carb$link)]) {
+    tryCatch({
+        date <- extract_date_bdf(url)
+        if (date >= as.Date("2022-05-19") && date <= as.Date("2023-11-04") && !is.na(date)) {
+            title <- extract_title_bdf(url)
+            bdf_data_carb <- rbind(bdf_data_carb, data.frame(title = title,
+                                                             date = date,
+                                                             link = url,
+                                                             stringsAsFactors = FALSE))
+        }
+    }, error = function(e) {
+        cat("Error processing URL:", url, "\n")
+        cat("Error message:", conditionMessage(e), "\n")
+    })
+}
+```
+
+```{r}
+View(bdf_data_carb)
+
+rbdf_carb_data <- bdf_data_carb %>% 
+        arrange(date)
+
+rbdf_carb_data <- rbdf_carb_data %>% 
+                        mutate(code = paste0(rep("bdf_", length(rbdf_carb_data$title)),
+                                sprintf("%03d", 1:length(rbdf_carb_data$title))))
+
+write.csv(rbdf_carb_data, "bdf_data_carb_reord.csv")
+```
