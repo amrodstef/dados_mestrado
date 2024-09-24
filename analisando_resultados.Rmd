@@ -1,0 +1,891 @@
+---
+title: "Analisando resultados dissertação"
+author: "André M. Rodeguero Stefanuto"
+date: "2024-02-21"
+output: pdf_document
+---
+# INÍCIO
+
+```{r, results = FALSE, echo = TRUE}
+#install.packages("tidyverse")
+library(tidyverse)
+library(wordcloud)
+library(wordcloud2)
+library(viridis)
+library(readtext)
+library(quanteda)
+library(stringi)
+library(qgraph)
+library(ggpubr)
+theme_set(theme_pubr())
+library(webshot)
+webshot::install_phantomjs()
+library("htmlwidgets")
+library(svglite)
+```
+
+
+# LIMPEZA DOS TEXTOS 
+
+## Preparação
+
+Aqui, o dado importado está em disco local. Para reprodução, o banco de dados está disponibilizado no repositório do GitHub - origem deste arquivo.
+
+```{r}
+un_data <- read.csv("data_text_diss.csv", header = T)
+```
+
+## Limpeza básica dos textos:
+
+```{r}
+clean_text <- function(text) {
+  # Cnverter para caixa baixa
+  text <- tolower(text)
+  
+  # Remover stopwords
+  st <- stopwords("pt")
+  for (i in 1:length(st)) {
+    text <- gsub(paste0("\\b", st[i], "\\b"), "", text) 
+  }
+  
+  # Remover pontuação e dígitos
+  text <- str_replace_all(text, "[[:punct:]]", "")
+  text <- str_replace_all(text, "[[:digit:]]", "")
+  
+  # Remover caracteres não alfanuméricos ou especiais
+  text <- str_replace_all(text, "[^[:alnum:]\\s]", "")
+  
+  # Remover espaços extra
+  text <- str_replace_all(text, "  ", " ")
+  text <- str_replace_all(text, "  ", " ")
+  text <- trimws(text)
+  
+  # Converter para ASCII
+  text <- stri_trans_general(text, "latin-ascii")
+  
+  #Remover eventuais palavras restantes após a limpeza
+  for (i in 1:length(st)) {
+    text <- gsub(paste0("\\b", st[i], "\\b"), "", text) 
+  }
+  
+  return(text)
+}
+```
+
+```{r}
+# Separar o dado por cada um dos jornais e utilizar a função de limpeza dos textos, criada acima.
+cleaned_data <- un_data %>%
+  group_by(jornal) %>%
+  mutate(cleaned_text = clean_text(texto_analise)) %>%
+  ungroup()
+
+View(cleaned_data)
+
+text_lpz <- cleaned_data$cleaned_text
+
+```
+
+## Tokenização
+
+Exploração mais a fundo para verificar outros detalhes extras, como palavras indesejadas e ainda não removidas ou outros erros. Também é aqui que começa a documentação dos nGramas.
+
+
+```{r}
+text_tks <- quanteda::tokens(text_lpz)
+tks_mtx <- dfm(text_tks)
+tks_occur <- as.data.frame(colSums(tks_mtx))
+names(tks_occur) <- "counting"
+tks_occur <- arrange(tks_occur, desc(counting)) %>% 
+  filter(counting > 1)
+
+tks_occur <- rownames_to_column(tks_occur, var = "word")
+
+View(tks_occur)
+#write.csv(tks_occur, "ocorrencia_palavras.csv")
+```
+
+Após exportar a planilha com a ocorrência de todos os tokens após a limpeza, removi, dela, as palavras que gostaria que não permanecessem no texto. Para obter essas palavras, realizarei a diferença entre a lista original e a lista com as palavras removidas.
+Remoção de palavras extras somente com +5 ocorrências.
+
+```{r}
+tks_list <- read.csv("ocorrencia_palavras_triada.csv", header = TRUE)
+
+#lista de palavras para serem removidas
+word_rmv <- setdiff(tks_occur$word, tks_list$word)
+
+for (i in 1:length(word_rmv)) {
+  text_lpz <- gsub(paste0("\\b", word_rmv[i], "\\b"), "", text_lpz)
+}
+
+text_lpz <- str_replace_all(text_lpz, "  ", " ")
+text_lpz <- str_replace_all(text_lpz, "  ", " ")
+
+```
+
+## N-gramas
+
+```{r}
+txt_bigram <- tokens_ngrams(text_tks, 2)
+mtx_bigram <- dfm(txt_bigram)
+topfeatures(mtx_bigram, n = 100)
+#write.csv(topfeatures(mtx_bigram, n = 100), "bigram_total.csv")
+
+
+txt_trigram <- tokens_ngrams(text_tks, 3)
+mtx_trigram <- dfm(txt_trigram)
+topfeatures(mtx_trigram, n = 100)
+#write.csv(topfeatures(mtx_trigram, n = 100), "trigram_total.csv")
+```
+
+## Substituições palavras
+
+Nesta etapa, a alteração de palavras dependeu da leitura extensiva dos textos para identificação de palavras compostas de interesse. Essas palavras estão reunidas no arquivo "cod_word.csv", disponível no mesmo repositório do banco de dados dos textos.
+
+```{r}
+cod_word <- read.csv("cod_word.csv", sep = ",", header = TRUE)
+names(cod_word) <- c("texto", "codificacao")
+
+wrong_words <- as.vector(cod_word$texto)
+
+new_words <- as.vector(cod_word$codificacao)
+
+for (i in seq_along(wrong_words)) {
+   text_lpz <- str_replace_all(text_lpz, wrong_words[i], new_words[i])
+}
+
+text_lpz <- str_replace_all(text_lpz, "  ", " ")
+text_lpz <- str_replace_all(text_lpz, "  ", " ")
+
+quadro_textos <- as.data.frame(text_lpz)
+names(quadro_textos) <- "final_texts"
+```
+
+
+## Organização dos dados limpos 
+
+Agora que os textos já foram explorados, triados, e limpos, inclusive com a troca e remoção de palavras, é preciso realizar dois procedimentos:
+ 1. reagrupá-lo e referenciá-lo dentro de seus respectivos códigos e jornais, para a necessidade de separar os textos, jornal a jornal, para as análises individuais.
+ 2. tokenizá-lo novamente para dar sequência aos procedimentos.
+ 
+ Vamos ao primeiro item:
+ 
+```{r}
+final_data <- as.data.frame(cbind(un_data$jornal, un_data$codigo_triado, 
+                                  un_data$pertencimento,
+                                  quadro_textos$final_texts))
+data_eco_final <- final_data %>% 
+  filter(jornal == "eco")
+  
+data_bdf_final <- final_data %>% 
+  filter(jornal == "bdf")
+
+data_fdsp_final <- final_data %>% 
+  filter(jornal == "fdsp")
+
+data_val_final <- final_data %>% 
+  filter(jornal == "val")
+```
+ 
+Agora ao segundo item: Fazer a tokenização do texto limpo e organizado, jornal a jornal, para exploração via nuvem de palavras e outras análises.
+
+# RESULTADOS INDIVIDUAIS
+
+## Resultados  O Eco
+
+### Nuvem de Palavras:
+
+```{r}
+tks_eco <- quanteda::tokens(data_eco_final$texto_analise)
+mtx_eco <- dfm(tks_eco)
+docnames(mtx_eco) <- data_eco_final$codigo_triado
+tks_eco_occur <- as.data.frame(colSums(mtx_eco))
+names(tks_eco_occur) <- "counting"
+tks_eco_occur <- arrange(tks_eco_occur, desc(counting)) %>% 
+  filter(counting > 1)
+
+tks_eco_occur <- rownames_to_column(tks_eco_occur, var = "word")
+
+View(tks_eco_occur)
+```
+
+
+```{r}
+set.seed(1234) # for reproducibility 
+
+tks_eco_occur_nuvem <- tks_eco_occur
+tks_eco_occur_nuvem[1,2] <- 50
+
+cloud_eco <- wordcloud2(data = tks_eco_occur_nuvem, size = 0.8, color='random-dark', minSize = 12, shape = "cloud")
+cloud_eco_b <- wordcloud2(data = tks_eco_occur_nuvem, size = 0.8, color = "black", minSize = 15, shape = "cloud", 
+                          gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+### Mapa de Coocorrências:
+
+```{r}
+text_cooc_eco <- data %>% 
+  filter(jornal == "eco") %>% 
+  select(codigo_triado, texto_analise)%>%
+  distinct(codigo_triado, .keep_all = TRUE)
+
+docnames_eco <- text_cooc_eco$codigo_triado
+  
+
+# Use map to convert each cell to a different text in the corpus
+text_cooc_eco <- text_cooc_eco %>%
+  #mutate(caps_text = map(texto_analise, ~ str_to_title(.x))) %>%
+  unnest(cols = c(texto_analise))  # Specify the column to unnest
+
+# Convert to corpus
+text_cooc_eco <- corpus(text_cooc_eco, text_field = "texto_analise")
+
+# Reshape to sentences
+text_cooc_eco <- corpus_reshape(text_cooc_eco, to = "paragraphs")
+
+#Clean the text after reshaping it to sentences
+text_cooc_eco <- clean_text(text_cooc_eco)
+
+#Replacing n-grams
+for (i in seq_along(wrong_words)) {
+   text_cooc_eco <- str_replace_all(text_cooc_eco, wrong_words[i], new_words[i])
+}
+text_cooc_eco <- str_replace_all(text_cooc_eco, "  ", " ")
+text_cooc_eco <- str_replace_all(text_cooc_eco, "  ", " ")
+
+#Removing specific tokens
+for (i in 1:length(word_rmv)) {
+  text_cooc_eco <- gsub(paste0("\\b", word_rmv[i], "\\b"), "", text_cooc_eco)
+}
+
+text_cooc_eco <- str_replace_all(text_cooc_eco, "  ", " ")
+text_cooc_eco <- str_replace_all(text_cooc_eco, "  ", " ")
+
+# Convert to tokens
+text_cooc_eco <- quanteda::tokens(text_cooc_eco)
+
+# Create dfm object
+dfm_obj <- dfm(text_cooc_eco)
+
+# Convert dfm to a co-occurrence matrix
+cooc_matrix_eco <- t(dfm_obj) %*% dfm_obj
+
+# Remove self-co-occurrences
+diag(cooc_matrix_eco) <- 0
+
+# Convert to a matrix class
+cooc_matrix_eco <- as.matrix(cooc_matrix_eco)
+
+# Function to remove interactions with frequency less than the threshold
+remove_infrequent_interactions <- function(input_matrix, threshold) {
+  # Filter interactions based on the threshold
+  input_matrix[input_matrix < threshold] <- 0
+  
+  # Remove isolated nodes (nodes with no interactions)
+  no_interaction_nodes <- rowSums(input_matrix != 0) == 0 & colSums(input_matrix != 0) == 0
+  input_matrix[!no_interaction_nodes, !no_interaction_nodes]
+}
+```
+
+Com os dados preparados, podemos elaborar a rede de coocorrências
+
+```{r}
+# Define the threshold for interaction frequency
+threshold_eco <- 10
+
+# Remove infrequent interactions from the input matrix
+cooc_matrix_eco <- remove_infrequent_interactions(cooc_matrix_eco, threshold_eco) 
+
+# Create a graph object with the threshold
+graph_obj_eco <- qgraph(cooc_matrix_eco,
+                    labels = colnames(cooc_matrix_eco), 
+                    label.cex = 1,
+                    label.scale = FALSE,
+                    label.prop = 1,
+                    node.label.offset = c(0.5, 0.5),
+                    node.width = .9,
+                    color = "white",
+                    border.color = "steelblue",
+                    layout = "spring", 
+                    width = 800,  
+                    height = 600,  
+                    edge.color = "steelblue",
+                    fade = TRUE,
+                    trans = TRUE,
+                    curve = 2
+                    )
+
+# Plot the graph with adjusted node width and layout
+svg(filename = "eco_mapa.svg",
+    width = 10, height = 6,
+     bg = "white")
+plot(graph_obj_eco)
+dev.off()
+```
+
+## Resultados Brasil de Fato
+
+### Nuvem de palavras
+
+```{r}
+tks_bdf <- quanteda::tokens(data_bdf_final$texto_analise)
+mtx_bdf <- dfm(tks_bdf)
+docnames(mtx_bdf) <- data_bdf_final$codigo_triado
+tks_bdf_occur <- as.data.frame(colSums(mtx_bdf))
+names(tks_bdf_occur) <- "counting"
+tks_bdf_occur <- arrange(tks_bdf_occur, desc(counting)) %>% 
+  filter(counting > 1)
+
+tks_bdf_occur <- rownames_to_column(tks_bdf_occur, var = "word")
+
+View(tks_bdf_occur)
+```
+
+
+```{r}
+set.seed(1234) # for reproducibility 
+
+tks_bdf_occur_nuvem <- tks_bdf_occur
+tks_bdf_occur_nuvem[1,2] <- 80
+tks_bdf_occur_nuvem[2,2] <- 70
+cloud_bdf <- 
+  wordcloud2(data = tks_bdf_occur_nuvem, size = 0.8, color='random-dark', minSize = 11, shape = "cloud")
+
+cloud_bdf_b <- wordcloud2(data = tks_bdf_occur_nuvem, size = 0.675, color = "black", minSize = 18, shape = "cloud", 
+                          gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+### Mapa de coocorrências
+
+```{r}
+text_cooc_bdf <- data %>% 
+  filter(jornal == "bdf") %>% 
+  select(codigo_triado, texto_analise)%>%
+  distinct(codigo_triado, .keep_all = TRUE)
+
+docnames_bdf <- text_cooc_bdf$codigo_triado
+  
+
+# Use map to convert each cell to a different text in the corpus
+text_cooc_bdf <- text_cooc_bdf %>%
+  #mutate(caps_text = map(texto_analise, ~ str_to_title(.x))) %>%
+  unnest(cols = c(texto_analise))  # Specify the column to unnest
+
+# Convert to corpus
+text_cooc_bdf <- corpus(text_cooc_bdf, text_field = "texto_analise")
+
+# Reshape to sentences
+text_cooc_bdf <- corpus_reshape(text_cooc_bdf, to = "paragraphs")
+
+#Clean the text after reshaping it to sentences
+text_cooc_bdf <- clean_text(text_cooc_bdf)
+
+#Replacing n-grams
+for (i in seq_along(wrong_words)) {
+   text_cooc_bdf <- str_replace_all(text_cooc_bdf, wrong_words[i], new_words[i])
+}
+text_cooc_bdf <- str_replace_all(text_cooc_bdf, "  ", " ")
+text_cooc_bdf <- str_replace_all(text_cooc_bdf, "  ", " ")
+
+#Removing specific tokens
+for (i in 1:length(word_rmv)) {
+  text_cooc_bdf <- gsub(paste0("\\b", word_rmv[i], "\\b"), "", text_cooc_bdf)
+}
+
+text_cooc_bdf <- str_replace_all(text_cooc_bdf, "  ", " ")
+text_cooc_bdf <- str_replace_all(text_cooc_bdf, "  ", " ")
+
+# Convert to tokens
+text_cooc_bdf <- quanteda::tokens(text_cooc_bdf)
+
+# Create dfm object
+dfm_obj <- dfm(text_cooc_bdf)
+
+# Convert dfm to a co-occurrence matrix
+cooc_matrix_bdf <- t(dfm_obj) %*% dfm_obj
+
+# Remove self-co-occurrences
+diag(cooc_matrix_bdf) <- 0
+
+# Convert to a matrix class
+cooc_matrix_bdf <- as.matrix(cooc_matrix_bdf)
+
+# Function to remove interactions with frequency less than the threshold
+remove_infrequent_interactions <- function(input_matrix, threshold) {
+  # Filter interactions based on the threshold
+  input_matrix[input_matrix < threshold] <- 0
+  
+  # Remove isolated nodes (nodes with no interactions)
+  no_interaction_nodes <- rowSums(input_matrix != 0) == 0 & colSums(input_matrix != 0) == 0
+  input_matrix[!no_interaction_nodes, !no_interaction_nodes]
+}
+```
+
+Com os dados preparados, podemos elaborar a rede de coocorrências
+
+```{r}
+# Define the threshold for interaction frequency
+threshold_bdf <- 20
+
+# Remove infrequent interactions from the input matrix
+cooc_matrix_bdf <- remove_infrequent_interactions(cooc_matrix_bdf, threshold_bdf) 
+
+# Create a graph object with the threshold
+graph_obj_bdf <- qgraph(cooc_matrix_bdf,
+                    labels = colnames(cooc_matrix_bdf), 
+                    label.cex = 1,
+                    label.scale = FALSE,
+                    label.prop = 1,
+                    node.label.offset = c(0.5, 0.5),
+                    node.width = .9,
+                    color = "white",
+                    border.color = "steelblue",
+                    layout = "spring", 
+                    width = 800,  # Adjust as needed
+                    height = 600,  # Adjust as needed
+                    edge.color = "steelblue",
+                    fade = TRUE,
+                    trans = TRUE,
+                    curve = 5
+                    )
+
+# Plot the graph with adjusted node width and layout
+plot(graph_obj_bdf)
+svg(filename = "bdf_mapa.svg",
+    width = 10, height = 6,
+     bg = "white") # para .png: , units = "cm", pointsize = 12, , res = 180
+plot(graph_obj_bdf)
+dev.off()
+
+```
+
+
+
+## Resultados Folha de S.Paulo
+
+### Nuvem de palavras
+
+```{r}
+tks_fdsp <- quanteda::tokens(data_fdsp_final$texto_analise)
+mtx_fdsp <- dfm(tks_fdsp)
+docnames(mtx_fdsp) <- data_fdsp_final$codigo_triado
+tks_fdsp_occur <- as.data.frame(colSums(mtx_fdsp))
+names(tks_fdsp_occur) <- "counting"
+tks_fdsp_occur <- arrange(tks_fdsp_occur, desc(counting)) %>% 
+  filter(counting > 1)
+
+tks_fdsp_occur <- rownames_to_column(tks_fdsp_occur, var = "word")
+
+View(tks_fdsp_occur)
+```
+
+
+```{r}
+set.seed(1234) # for reproducibility 
+cloud_fdsp <- wordcloud2(data = tks_fdsp_occur, size = 0.9, color='random-dark', minSize = 10, shape = "cloud")
+cloud_fdsp_b <- wordcloud2(data = tks_fdsp_occur, size = 0.925, color = "black", minSize = 13, shape = "cloud", 
+                          gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+
+### Mapa de coocorrências
+
+```{r}
+text_cooc_fdsp <- data %>% 
+  filter(jornal == "fdsp") %>% 
+  select(codigo_triado, texto_analise)%>%
+  distinct(codigo_triado, .keep_all = TRUE)
+
+docnames_fdsp <- text_cooc_fdsp$codigo_triado
+  
+
+# Use map to convert each cell to a different text in the corpus
+text_cooc_fdsp <- text_cooc_fdsp %>%
+  #mutate(caps_text = map(texto_analise, ~ str_to_title(.x))) %>%
+  unnest(cols = c(texto_analise))  # Specify the column to unnest
+
+# Convert to corpus
+text_cooc_fdsp <- corpus(text_cooc_fdsp, text_field = "texto_analise")
+
+# Reshape to sentences
+text_cooc_fdsp <- corpus_reshape(text_cooc_fdsp, to = "paragraphs")
+
+#Clean the text after reshaping it to sentences
+text_cooc_fdsp <- clean_text(text_cooc_fdsp)
+
+#Replacing n-grams
+for (i in seq_along(wrong_words)) {
+   text_cooc_fdsp <- str_replace_all(text_cooc_fdsp, wrong_words[i], new_words[i])
+}
+text_cooc_fdsp <- str_replace_all(text_cooc_fdsp, "  ", " ")
+text_cooc_fdsp <- str_replace_all(text_cooc_fdsp, "  ", " ")
+
+#Removing specific tokens
+for (i in 1:length(word_rmv)) {
+  text_cooc_fdsp <- gsub(paste0("\\b", word_rmv[i], "\\b"), "", text_cooc_fdsp)
+}
+
+text_cooc_fdsp <- str_replace_all(text_cooc_fdsp, "  ", " ")
+text_cooc_fdsp <- str_replace_all(text_cooc_fdsp, "  ", " ")
+
+# Convert to tokens
+text_cooc_fdsp <- quanteda::tokens(text_cooc_fdsp)
+
+# Create dfm object
+dfm_obj <- dfm(text_cooc_fdsp)
+
+# Convert dfm to a co-occurrence matrix
+cooc_matrix_fdsp <- t(dfm_obj) %*% dfm_obj
+
+# Remove self-co-occurrences
+diag(cooc_matrix_fdsp) <- 0
+
+# Convert to a matrix class
+cooc_matrix_fdsp <- as.matrix(cooc_matrix_fdsp)
+
+# Function to remove interactions with frequency less than the threshold
+remove_infrequent_interactions <- function(input_matrix, threshold) {
+  # Filter interactions based on the threshold
+  input_matrix[input_matrix < threshold] <- 0
+  
+  # Remove isolated nodes (nodes with no interactions)
+  no_interaction_nodes <- rowSums(input_matrix != 0) == 0 & colSums(input_matrix != 0) == 0
+  input_matrix[!no_interaction_nodes, !no_interaction_nodes]
+}
+```
+
+Com os dados preparados, podemos elaborar a rede de coocorrências
+
+```{r}
+# Define the threshold for interaction frequency
+threshold_fdsp <- 22
+
+# Remove infrequent interactions from the input matrix
+cooc_matrix_fdsp <- remove_infrequent_interactions(cooc_matrix_fdsp, threshold_fdsp) 
+
+# Create a graph object with the threshold
+graph_obj_fdsp <- qgraph(cooc_matrix_fdsp,
+                    labels = colnames(cooc_matrix_fdsp), 
+                    label.cex = 1,
+                    label.scale = FALSE,
+                    label.prop = 1,
+                    node.label.offset = c(0.5, 0.5),
+                    node.width = .9,
+                    color = "white",
+                    border.color = "steelblue",
+                    layout = "spring", 
+                    width = 800,  # Adjust as needed
+                    height = 600,  # Adjust as needed
+                    edge.color = "steelblue",
+                    fade = TRUE,
+                    trans = TRUE,
+                    curve = 2
+                    )
+
+# Plot the graph with adjusted node width and layout
+svg(filename = "fdsp_mapa.svg",
+    width = 10, height = 6,
+     bg = "white")
+
+#png(filename = "fdsp_mapa.png",
+#    width = 24, height = 16, units = "cm", pointsize = 12,
+#     bg = "white", res = 180)
+plot(graph_obj_fdsp)
+dev.off()
+```
+
+
+
+
+
+
+## Resultados Valor Econômico
+
+### Nuvem de palavras
+
+```{r}
+tks_val <- quanteda::tokens(data_val_final$texto_analise)
+mtx_val <- dfm(tks_val)
+docnames(mtx_val) <- data_val_final$codigo_triado
+tks_val_occur <- as.data.frame(colSums(mtx_val))
+names(tks_val_occur) <- "counting"
+tks_val_occur <- arrange(tks_val_occur, desc(counting)) %>% 
+  filter(counting > 1)
+
+tks_val_occur <- rownames_to_column(tks_val_occur, var = "word")
+
+View(tks_val_occur)
+```
+
+
+```{r}
+set.seed(1234) # for reproducibility 
+cloud_val <- wordcloud2(data = tks_val_occur, size = 0.85, color='random-dark', minSize = 15, shape = "cloud")
+
+cloud_val_b <- wordcloud2(data = tks_val_occur, size = 0.85, color = "black", minSize = 14, shape = "cloud", 
+                          gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+
+### Mapa de coocorrências
+
+```{r}
+text_cooc_val <- data %>% 
+  filter(jornal == "val") %>% 
+  select(codigo_triado, texto_analise)%>%
+  distinct(codigo_triado, .keep_all = TRUE)
+
+docnames_val <- text_cooc_val$codigo_triado
+  
+
+# Use map to convert each cell to a different text in the corpus
+text_cooc_val <- text_cooc_val %>%
+  #mutate(caps_text = map(texto_analise, ~ str_to_title(.x))) %>%
+  unnest(cols = c(texto_analise))  # Specify the column to unnest
+
+# Convert to corpus
+text_cooc_val <- corpus(text_cooc_val, text_field = "texto_analise")
+
+# Reshape to sentences
+text_cooc_val <- corpus_reshape(text_cooc_val, to = "paragraphs")
+
+#Clean the text after reshaping it to sentences
+text_cooc_val <- clean_text(text_cooc_val)
+
+#Replacing n-grams
+for (i in seq_along(wrong_words)) {
+   text_cooc_val <- str_replace_all(text_cooc_val, wrong_words[i], new_words[i])
+}
+text_cooc_val <- str_replace_all(text_cooc_val, "  ", " ")
+text_cooc_val <- str_replace_all(text_cooc_val, "  ", " ")
+
+#Removing specific tokens
+for (i in 1:length(word_rmv)) {
+  text_cooc_val <- gsub(paste0("\\b", word_rmv[i], "\\b"), "", text_cooc_val)
+}
+
+text_cooc_val <- str_replace_all(text_cooc_val, "  ", " ")
+text_cooc_val <- str_replace_all(text_cooc_val, "  ", " ")
+
+# Convert to tokens
+text_cooc_val <- quanteda::tokens(text_cooc_val)
+
+# Create dfm object
+dfm_obj <- dfm(text_cooc_val)
+
+# Convert dfm to a co-occurrence matrix
+cooc_matrix_val <- t(dfm_obj) %*% dfm_obj
+
+# Remove self-co-occurrences
+diag(cooc_matrix_val) <- 0
+
+# Convert to a matrix class
+cooc_matrix_val <- as.matrix(cooc_matrix_val)
+
+# Function to remove interactions with frequency less than the threshold
+remove_infrequent_interactions <- function(input_matrix, threshold) {
+  # Filter interactions based on the threshold
+  input_matrix[input_matrix < threshold] <- 0
+  
+  # Remove isolated nodes (nodes with no interactions)
+  no_interaction_nodes <- rowSums(input_matrix != 0) == 0 & colSums(input_matrix != 0) == 0
+  input_matrix[!no_interaction_nodes, !no_interaction_nodes]
+}
+```
+
+Com os dados preparados, podemos elaborar a rede de coocorrências
+
+```{r}
+# Define the threshold for interaction frequency
+threshold_val <- 120
+
+# Remove infrequent interactions from the input matrix
+cooc_matrix_val <- remove_infrequent_interactions(cooc_matrix_val, threshold_val) 
+
+# Create a graph object with the threshold
+graph_obj_val <- qgraph(cooc_matrix_val,
+                    labels = colnames(cooc_matrix_val), 
+                    label.cex = 1,
+                    label.scale = FALSE,
+                    label.prop = 1,
+                    node.label.offset = c(0.5, 0.5),
+                    node.width = .9,
+                    color = "white",
+                    border.color = "steelblue",
+                    layout = "spring", 
+                    width = 800,  # Adjust as needed
+                    height = 600,  # Adjust as needed
+                    edge.color = "steelblue",
+                    fade = TRUE,
+                    trans = TRUE,
+                    curve = 2
+                    )
+
+# Plot the graph with adjusted node width and layout
+svg(filename = "val_mapa.svg",
+    width = 10, height = 6,
+     bg = "white")
+#png(filename = "val_mapa_test.png",
+#    width = 24, height = 16, units = "cm", pointsize = 12,
+#     bg = "white", res = 180)
+plot(graph_obj_val)
+dev.off()
+```
+
+
+
+
+
+
+## RESULTADOS COLETIVOS
+# TOPIC MODELLING
+
+## Preparação do corpus
+
+```{r}
+library(quanteda)
+library(topicmodels)
+```
+
+
+Construção dos textos que serão utilizados para a modelagem. Para este fim, considerarei o total de textos de um determinado jornal como um documento. Dessa forma, serão 04 documentos analisados, cada um correspondente a um jornal.
+
+Os textos organizados na varia´vel "final_data" já contam com toda a limpeza necessária para a modelagem de tópicos (remoção de pontuação, remoção de stopwords, remoção de palavras específicas, substituição dos bigramas, etc.).
+
+```{r}
+topic_text <- final_data %>% 
+  select(jornal, texto_analise) %>% 
+  group_by(jornal) %>% 
+  summarise(texto_completo = paste(texto_analise, collapse = "\n\n"))
+```
+
+Após carregar os textos, já limpos, é preciso prepará-los para a modelagem de tópicos. Para tanto, cada documento (bdf, eco, fdsp, val) será tokenizado e terá uma matriz de coocorrência de termos construída, assim como já fizemos em outro momento, mas agora a partir dos textos unificados.
+
+```{r}
+topic_corpus <- corpus(topic_text$texto_completo, docnames = topic_text$jornal)
+
+topic_tks <- quanteda::tokens(topic_corpus)
+
+topic_dtm <- topic_tks %>% 
+  dfm() %>% 
+  dfm_trim(min_docfreq = 0.01, max_docfreq = 1, docfreq_type = "prop")
+
+# Have a look at the number of documents and terms in the matrix
+dim(topic_dtm)
+summary(topic_dtm)
+
+# We have empty rows in the matrix and it sounds like noise in topic modelling. So, we're gonna remove them.
+empty_rows <- rowSums(topic_dtm) > 0
+topic_dtm <- topic_dtm[empty_rows, ]
+```
+
+## Criação do modelo
+
+Agora, vamos começar a construção do modelo. Trabalharemos com um total de 4 tópicos (K).
+
+```{r}
+K <- 4
+
+topic_model <- LDA(topic_dtm, K, method="Gibbs", control=list(iter = 500, seed = 1, verbose = 25))
+
+```
+
+```{r}
+# have a look a some of the results (posterior distributions)
+tm_result <- posterior(topic_model)
+# format of the resulting object
+attributes(tm_result)
+
+ncol(topic_dtm)
+
+# topics are probability distribtions over the entire vocabulary
+beta <- tm_result$terms   # get beta from results
+dim(beta)                # K distributions over ncol(DTM) terms
+rowSums(beta)  
+
+
+# for every document we have a probability distribution of its contained topics
+theta <- tm_result$topics 
+dim(theta)               # nDocs(DTM) distributions over K topics
+rowSums(theta) 
+```
+
+```{r}
+terms(topic_model, 10)
+```
+
+A partir de agora, fica ruim se referir a um determinado tópico somente a partir de seu número. Nomearemos o tópico a partir de suas 3 palavras mais comuns. Num futuro, será possível nomear os tópicos a partir das interpretações dadas a eles.
+
+```{r}
+topic_names <- apply(terms(topic_model, 3), 2, paste, collapse = " ")
+```
+
+Nós podemos visualizar como cada tópico foi construido utilizando-se de nuvens de palavras dentro de cada um deles. Não é uma ferramenta estatística relevante, mas é um passo exploratório interessante para visualizar a estrutura dos tópicos.
+
+## Explorando cada tópico.
+
+### Nuvem de palavras Tópico 01
+
+```{r}
+moccur_terms_one <- names(sort(tm_result$terms[1,], decreasing=TRUE)[1:150])
+terms_prob_one <- sort(tm_result$terms[1,], decreasing=TRUE)[1:150]
+wordcloud2(data.frame(moccur_terms_one, terms_prob_one), shuffle = FALSE, size = 1.1)
+
+wordcloud2(data = data.frame(moccur_terms_one, terms_prob_one), size = 1.025, color = "black", 
+           minSize = 17, shape = "cloud",
+           gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+
+### Nuvem de palavras Tópico 02
+
+```{r}
+moccur_terms_two <- names(sort(tm_result$terms[2,], decreasing=TRUE)[1:150])
+terms_prob_two <- sort(tm_result$terms[2,], decreasing=TRUE)[1:150]
+wordcloud2(data.frame(moccur_terms_two, terms_prob_two), shuffle = FALSE, size = .75, minSize = 10)
+
+wordcloud2(data = data.frame(moccur_terms_two, terms_prob_two), size = .75, color = "black", 
+           minSize = 10, shape = "cloud",
+           gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+### Nuvem de palavras Tópico 03
+
+```{r}
+moccur_terms_three <- names(sort(tm_result$terms[3,], decreasing=TRUE)[1:150])
+terms_prob_three <- sort(tm_result$terms[3,], decreasing=TRUE)[1:150]
+wordcloud2(data.frame(moccur_terms_three, terms_prob_three), shuffle = FALSE, size = 0.65, minSize = 8)
+
+wordcloud2(data = data.frame(moccur_terms_three, terms_prob_three), size = .65, color = "black", 
+           minSize = 8, shape = "cloud",
+           gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+### Nuvem de palavras Tópico 04
+
+```{r}
+moccur_terms_four <- names(sort(tm_result$terms[4,], decreasing=TRUE)[1:150])
+terms_prob_four <- sort(tm_result$terms[4,], decreasing=TRUE)[1:150]
+wordcloud2(data.frame(moccur_terms_four, terms_prob_four), shuffle = FALSE, size = .9, minSize = 10)
+
+wordcloud2(data = data.frame(moccur_terms_four, terms_prob_four), size = .95, color = "black", 
+           minSize = 10, shape = "cloud",
+           gridSize = 10, shuffle = FALSE, minRotation = 0, rotateRatio = 0)
+```
+
+
+### Visualização geral dos tópicos
+
+Agora vamos visualizar os tópicos distribuidos dentro de cada um dos documentos (jornais) selecionados e ver as proporções de cada tópico dentro de cada jornal.
+
+```{r}
+library(reshape2)
+
+doc_number <- length(topic_text$jornal)
+
+topic_proportion <- theta[1:4, ]
+colnames(topic_proportion) <- topic_names
+
+graph_df <- melt(cbind(jornal = c("Brasil de Fato", "O Eco", "Folha de S.Paulo", "Valor Econômico"), data.frame(topic_proportion)))
+graph_df$jornal <- factor(graph_df$jornal, levels = c("O Eco", "Brasil de Fato", "Valor Econômico", "Folha de S.Paulo"))
+#graph_df$variable <- factor(graph_df$variable, levels = topic_names[1:5])
+```
