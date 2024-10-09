@@ -1,6 +1,7 @@
-Neste repositório estão depositados os códigos (em .Rmd) utilizados para a coleta e análises de dados de minha dissertação de mestrado, assim como os arquivos - alguns criados localmente - necessários para rodagem dos códigos.
+Neste repositório estão depositados os códigos (em .Rmd) utilizados para a coleta e análises de dados de minha dissertação de mestrado* , assim como os arquivos - alguns criados localmente - necessários para rodagem dos códigos.
 100% do código utilizado está R.
 
+* Citação: STEFANUTO, A.M.R. A mercantilização da natureza: como jornais brasileiros comunicam o mercado de carbono e suas relações com os manguezais. Dissertação (Mestrado em Divulgação Científica e Cultural) - Instituo de Estudos da Linguagem, Universidade Estadual de Campinas, Campinas, 2024.
 
 Guia de arquivos:
 
